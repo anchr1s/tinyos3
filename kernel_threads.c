@@ -32,6 +32,8 @@ PTCB* create_ptcb(PCB* pcb, Task task, int argl, void* args)
     rlnode_init(&ptcb->thread_node, ptcb);
     rlist_push_back(&pcb->threads_list, &ptcb->thread_node);
 
+    pcb->live_threads++;
+
     return ptcb;
 }
 
@@ -98,7 +100,7 @@ static PTCB* find_ptcb(PCB* pcb, Tid_t tid)
     return NULL;
 }
 
-static void release_ptcb(PTCB* ptcb)
+void release_ptcb(PTCB* ptcb)
 {
     rlist_remove(&ptcb->thread_node);
     free(ptcb);
@@ -164,6 +166,46 @@ int sys_ThreadDetach(Tid_t tid)
   */
 void sys_ThreadExit(int exitval)
 {
+    PCB* pcb = CURPROC;
+    TCB* tcb = cur_thread();
+    PTCB* ptcb = tcb->ptcb;
 
+    CHECK_CONDITION(ptcb != NULL);
+    CHECK_CONDITION(!ptcb->exited);
+
+    /* Store the exit status. */
+    ptcb->exitval = exitval;
+    ptcb->exited = 1;
+
+    /* One fewer active process thread. */
+    pcb->live_threads--;
+
+    /* Disconnect the TCB before the scheduler frees it. */
+    if (pcb->main_thread == tcb)
+        pcb->main_thread = NULL;
+
+    ptcb->tcb = NULL;
+    tcb->ptcb = NULL;
+
+    /* Wake threads waiting in ThreadJoin. */
+    kernel_broadcast(&ptcb->exit_cv);
+
+    /* Detached threads may release their PTCB. */
+    if (ptcb->detached && ptcb->join_waiters == 0)
+        release_ptcb(ptcb);
+
+    /* The last thread also finishes the process. */
+    /* The last thread must also terminate its process. */
+    if (pcb->live_threads == 0) {
+
+        sys_Exit(pcb->exit_requested ? pcb->exitval : 0);
+
+        __builtin_unreachable();
+    }
+
+    /* Permanently terminate this scheduler thread. */
+    kernel_sleep(EXITED, SCHED_USER);
+
+    __builtin_unreachable();
 }
 

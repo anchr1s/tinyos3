@@ -40,6 +40,8 @@ static inline void initialize_PCB(PCB* pcb)
     pcb->FIDT[i] = NULL;
 
   rlnode_init(& pcb->threads_list, NULL);
+  pcb->live_threads = 0;
+  pcb->exit_requested = 0;
   rlnode_init(& pcb->children_list, NULL);
   rlnode_init(& pcb->exited_list, NULL);
   rlnode_init(& pcb->children_node, pcb);
@@ -84,6 +86,8 @@ PCB* acquire_PCB()
   if(pcb_freelist != NULL) {
     pcb = pcb_freelist;
     pcb->pstate = ALIVE;
+    pcb->live_threads = 0;
+    pcb->exit_requested = 0;
     pcb_freelist = pcb_freelist->parent;
     process_count++;
   }
@@ -299,6 +303,21 @@ void sys_Exit(int exitval)
 
   PCB *curproc = CURPROC;  /* cache for efficiency */
 
+  /* Keep shared process resources while other threads are active. */
+  if (curproc->live_threads > 1) {
+
+      /* Preserve the first explicit process exit status. */
+      if (!curproc->exit_requested) {
+          curproc->exit_requested = 1;
+          curproc->exitval = exitval;
+      }
+
+      /* Terminate this thread without cleaning the PCB yet. */
+      sys_ThreadExit(exitval);
+
+      __builtin_unreachable();
+  }
+
   /* First, store the exit status */
   curproc->exitval = exitval;
 
@@ -341,6 +360,15 @@ void sys_Exit(int exitval)
   /* 
     Do all the other cleanup we want here, close files etc. 
    */
+
+   /* All process threads have terminated.
+   Their remaining PTCBs can now be safely released. */
+  while (!is_rlist_empty(&curproc->threads_list)) {
+
+      PTCB* ptcb = curproc->threads_list.next->obj;
+
+      release_ptcb(ptcb);
+  }
 
   /* Release the args data */
   if(curproc->args) {

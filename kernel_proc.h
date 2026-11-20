@@ -66,6 +66,8 @@ typedef struct process_control_block {
   int exitval;            /**< @brief The exit value of the process */
 
   rlnode threads_list;
+  unsigned int live_threads;
+  int exit_requested;
 
   TCB* main_thread;       /**< @brief The main thread */
   Task main_task;         /**< @brief The main thread's function */
@@ -88,6 +90,8 @@ typedef struct process_control_block {
 
 } PCB;
 
+void release_ptcb(PTCB* ptcb);
+void finalize_process(PCB* pcb);
 
 /**
   @brief Initialize the process table.

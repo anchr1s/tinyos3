@@ -155,10 +155,23 @@ int sys_ThreadJoin(Tid_t tid, int* exitval)
 
 /**
   @brief Detach the given thread.
-  */
+ */
 int sys_ThreadDetach(Tid_t tid)
 {
-	return -1;
+    /* Find the thread within the current process. */
+    PTCB* ptcb = find_ptcb(CURPROC, tid);
+
+    /* Invalid or already exited threads cannot be detached. */
+    if (ptcb == NULL || ptcb->exited)
+        return -1;
+
+    /* Mark the thread as detached. Repeated calls are allowed. */
+    ptcb->detached = 1;
+
+    /* Wake up threads waiting in ThreadJoin. */
+    kernel_broadcast(&ptcb->exit_cv);
+
+    return 0;
 }
 
 /**

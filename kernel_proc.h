@@ -30,6 +30,30 @@ typedef enum pid_state_e {
   ZOMBIE  /**< @brief The PID is held by a zombie */
 } pid_state;
 
+typedef struct process_thread_control_block {
+    PCB* owner_pcb;
+    TCB* tcb;
+
+    Tid_t tid;
+    int joined;
+
+    Task task;
+    int argl;
+    void* args;
+
+    int exitval;
+    int exited;
+    int detached;
+    unsigned int join_waiters;
+
+    CondVar exit_cv;
+    rlnode thread_node;
+
+} PTCB;
+
+/* Register a thread in its owning process. */
+PTCB* create_ptcb(PCB* pcb, Task task, int argl, void* args);
+
 /**
   @brief Process Control Block.
 
@@ -40,6 +64,8 @@ typedef struct process_control_block {
 
   PCB* parent;            /**< @brief Parent's pcb. */
   int exitval;            /**< @brief The exit value of the process */
+
+  rlnode threads_list;
 
   TCB* main_thread;       /**< @brief The main thread */
   Task main_task;         /**< @brief The main thread's function */

@@ -1,14 +1,76 @@
+#include <stdlib.h>
 
 #include "tinyos.h"
 #include "kernel_sched.h"
 #include "kernel_proc.h"
+#include "kernel_cc.h"
+
+PTCB* create_ptcb(PCB* pcb, Task task, int argl, void* args)
+{
+    PTCB* ptcb = malloc(sizeof(*ptcb));
+
+    if (ptcb == NULL)
+        return NULL;
+
+    ptcb->owner_pcb = pcb;
+    ptcb->tcb = NULL;
+
+    ptcb->task = task;
+    ptcb->argl = argl;
+    ptcb->args = args;
+
+    ptcb->exitval = 0;
+    ptcb->exited = 0;
+    ptcb->detached = 0;
+    ptcb->join_waiters = 0;
+
+    ptcb->exit_cv = COND_INIT;
+
+    ptcb->tid = NOTHREAD;
+    ptcb->joined = 0;
+
+    rlnode_init(&ptcb->thread_node, ptcb);
+    rlist_push_back(&pcb->threads_list, &ptcb->thread_node);
+
+    return ptcb;
+}
+
+static void start_process_thread(void)
+{
+    PTCB* ptcb = cur_thread()->ptcb;
+
+    int exitval = ptcb->task(ptcb->argl, ptcb->args);
+
+    ThreadExit(exitval);
+}
 
 /** 
   @brief Create a new thread in the current process.
   */
 Tid_t sys_CreateThread(Task task, int argl, void* args)
 {
-	return NOTHREAD;
+	  if (task == NULL)
+      return NOTHREAD;
+
+    PCB* pcb = CURPROC;
+
+    PTCB* ptcb = create_ptcb(pcb, task, argl, args);
+
+    if (ptcb == NULL)
+        return NOTHREAD;
+
+    TCB* tcb = spawn_thread(pcb, start_process_thread);
+
+    ptcb->tcb = tcb;
+    tcb->ptcb = ptcb;
+
+    ptcb->tid = (Tid_t)tcb;
+
+    Tid_t tid = (Tid_t)tcb;
+
+    wakeup(tcb);
+
+    return tid;
 }
 
 /**
@@ -19,12 +81,74 @@ Tid_t sys_ThreadSelf()
 	return (Tid_t) cur_thread();
 }
 
+static PTCB* find_ptcb(PCB* pcb, Tid_t tid)
+{
+    rlnode* list = &pcb->threads_list;
+
+    for (rlnode* node = list->next;
+         node != list;
+         node = node->next)
+    {
+        PTCB* ptcb = node->obj;
+
+        if (ptcb->tid == tid)
+            return ptcb;
+    }
+
+    return NULL;
+}
+
+static void release_ptcb(PTCB* ptcb)
+{
+    rlist_remove(&ptcb->thread_node);
+    free(ptcb);
+}
+
 /**
   @brief Join the given thread.
   */
 int sys_ThreadJoin(Tid_t tid, int* exitval)
 {
-	return -1;
+    /* A thread cannot join itself or an invalid thread. */
+    if (tid == NOTHREAD || tid == (Tid_t)cur_thread())
+        return -1;
+
+    /* Find the requested thread in the current process. */
+    PTCB* ptcb = find_ptcb(CURPROC, tid);
+
+    if (ptcb == NULL || ptcb->detached || ptcb->joined)
+        return -1;
+
+    /* Wait until the target thread terminates or is detached. */
+    if (!ptcb->exited) {
+        ptcb->join_waiters++;
+
+        while (!ptcb->exited && !ptcb->detached)
+            kernel_wait(&ptcb->exit_cv, SCHED_USER);
+
+        ptcb->join_waiters--;
+    }
+
+    /* A detached thread cannot be joined. */
+    if (ptcb->detached) {
+        if (ptcb->exited && ptcb->join_waiters == 0)
+            release_ptcb(ptcb);
+
+        return -1;
+    }
+
+    /* Return the exit status, if requested. */
+    if (exitval != NULL)
+        *exitval = ptcb->exitval;
+
+    /* Mark the thread as successfully joined. */
+    ptcb->joined = 1;
+
+    /* Keep the PTCB until all existing waiters have resumed. */
+    if (ptcb->join_waiters == 0)
+        release_ptcb(ptcb);
+
+    return 0;
 }
 
 /**

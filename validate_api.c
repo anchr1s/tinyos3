@@ -1402,6 +1402,7 @@ TEST_SUITE(thread_tests,
 	"A suite of tests for threads."
 	)
 {
+	&test_threadself,
 	&test_join_illegal_tid_gives_error,
 	&test_detach_illegal_tid_gives_error,
 	&test_detach_self,

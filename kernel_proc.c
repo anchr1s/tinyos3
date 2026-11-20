@@ -39,6 +39,7 @@ static inline void initialize_PCB(PCB* pcb)
   for(int i=0;i<MAX_FILEID;i++)
     pcb->FIDT[i] = NULL;
 
+  rlnode_init(& pcb->threads_list, NULL);
   rlnode_init(& pcb->children_list, NULL);
   rlnode_init(& pcb->exited_list, NULL);
   rlnode_init(& pcb->children_node, pcb);
@@ -178,7 +179,15 @@ Pid_t sys_Exec(Task call, int argl, void* args)
     the initialization of the PCB.
    */
   if(call != NULL) {
+    PTCB* main_ptcb = create_ptcb(newproc, call, argl, newproc->args);
+    CHECK_CONDITION(main_ptcb != NULL);
+
     newproc->main_thread = spawn_thread(newproc, start_main_thread);
+
+    main_ptcb->tcb = newproc->main_thread;
+    main_ptcb->tid = (Tid_t)newproc->main_thread;
+    newproc->main_thread->ptcb = main_ptcb;
+
     wakeup(newproc->main_thread);
   }
 

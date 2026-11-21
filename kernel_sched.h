@@ -120,6 +120,13 @@ struct process_thread_control_block* ptcb;
   int priority; /**< @brief MLFQ: Dynamic scheduling priority. */
   uint64_t queued_at;
 
+  /* MLFQ: Temporary priority inherited from mutex waiters.
+   -1 means that no priority is inherited. */
+  int inherited_priority;
+
+  /* MLFQ: Number of mutexes currently held by this thread. */
+  unsigned int held_mutexes;
+
 	void (*thread_func)(); /**< @brief The initial function executed by this thread */
 
 	TimerDuration wakeup_time; /**< @brief The time this thread will be woken up by the scheduler */
@@ -268,6 +275,19 @@ void sleep_releasing(Thread_state newstate, Mutex* mx, enum SCHED_CAUSE cause, T
   it will renew the quantum for the current thread.
  */
 void yield(enum SCHED_CAUSE cause);
+
+/*
+  MLFQ: Update a thread's inherited priority.
+  A value of -1 removes the temporary priority boost.
+*/
+void sched_set_inherited_priority(TCB* tcb, int priority);
+
+/*
+  MLFQ: Mutex priority ceiling bookkeeping.
+  These functions must be called with preemption disabled.
+*/
+void sched_mutex_acquired(void);
+void sched_mutex_released(void);
 
 /**
   @brief Enter the scheduler.

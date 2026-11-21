@@ -6,6 +6,8 @@
 #include "kernel_proc.h"
 #include "kernel_cc.h"
 
+/* MLFQ: Scheduler lock must not receive a priority ceiling. */
+extern Mutex sched_spinlock;
 
 /**
 	@file kernel_cc.c
@@ -32,34 +34,61 @@
  	The implementation is based on GCC atomics, as the standard C11 primitives
  	are not supported by all recent compilers. Eventually, this will change.
  */
+
 void Mutex_Lock(Mutex* lock)
 {
 #define MUTEX_SPINS (cpu_cores()>1 ?  1000 : 10000)
 
+  /* MLFQ: Protect mutex acquisition and priority bookkeeping. */
+  int oldpre = preempt_off;
+
   while(__atomic_test_and_set(lock,__ATOMIC_ACQUIRE)) {
+
+    /* MLFQ: Restore preemption while waiting for the mutex. */
+    if(oldpre) preempt_on;
+
     int spin=MUTEX_SPINS;
     while(__atomic_load_n(lock, __ATOMIC_RELAXED)) {
 #if defined(__x86__) || defined(__x86_64__)
       __builtin_ia32_pause();
 #endif
-      if(spin>0) 
-      	spin--; 
-      else { 
-      	spin=MUTEX_SPINS; 
-      	if(cpu_interrupts_enabled())
-      		yield(SCHED_MUTEX); 
+      if(spin>0)
+        spin--;
+      else {
+        spin=MUTEX_SPINS;
+        if(cpu_interrupts_enabled())
+          yield(SCHED_MUTEX);
       }
     }
+
+    /* MLFQ: Disable preemption before retrying acquisition. */
+    oldpre = preempt_off;
   }
+
+  /* MLFQ: Do not boost priority for the scheduler's own lock. */
+  if (lock != &sched_spinlock)
+      sched_mutex_acquired();
+
+  /* MLFQ: Restore the previous preemption state. */
+  if(oldpre) preempt_on;
+
 #undef MUTEX_SPINS
 }
 
-
 void Mutex_Unlock(Mutex* lock)
 {
-  __atomic_clear(lock, __ATOMIC_RELEASE);
-}
+  /* MLFQ: Prevent preemption during priority restoration. */
+  int oldpre = preempt_off;
 
+/* MLFQ: Exclude the scheduler lock from mutex bookkeeping. */
+if (lock != &sched_spinlock)
+    sched_mutex_released();
+
+  __atomic_clear(lock, __ATOMIC_RELEASE);
+
+  /* Restore the previous preemption state. */
+  if(oldpre) preempt_on;
+}
 
 /*
 	Condition variables.	

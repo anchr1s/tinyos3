@@ -165,6 +165,10 @@ TCB* spawn_thread(PCB* pcb, void (*func)())
 	tcb->phase = CTX_CLEAN;
 	/* MLFQ: Initialize new threads at the highest priority. */
 	tcb->priority = MLFQ_INITIAL_PRIORITY;
+	/* MLFQ: New threads have no inherited priority. */
+	tcb->inherited_priority = -1;
+	/* MLFQ: New threads initially hold no mutexes. */
+	tcb->held_mutexes = 0;
 	tcb->thread_func = func;
 	tcb->wakeup_time = NO_TIMEOUT;
 	rlnode_init(&tcb->sched_node, tcb); /* Intrusive list node */
@@ -239,6 +243,50 @@ Mutex sched_spinlock = MUTEX_INIT; /* spinlock for scheduler queue */
 /* Protected by sched_spinlock. */
 static uint64_t mlfq_dispatches = 0;
 
+/*
+  MLFQ: Raise the current thread's effective priority
+  while it holds one or more mutexes.
+
+  Called with preemption disabled.
+*/
+void sched_mutex_acquired(void)
+{
+    TCB* tcb = cctx[cpu_core_id].current_thread;
+
+    /* No normal thread exists during early boot or idle. */
+    if (tcb == NULL || tcb->type != NORMAL_THREAD)
+        return;
+
+    /* Track nested mutex acquisitions. */
+    tcb->held_mutexes++;
+
+    /* Apply the highest priority as a temporary ceiling. */
+    tcb->inherited_priority = MLFQ_LEVELS - 1;
+}
+
+/*
+  MLFQ: Restore the base priority after the last
+  mutex owned by the current thread is released.
+
+  Called with preemption disabled.
+*/
+void sched_mutex_released(void)
+{
+    TCB* tcb = cctx[cpu_core_id].current_thread;
+
+    if (tcb == NULL || tcb->type != NORMAL_THREAD)
+        return;
+
+    /* Every unlock must match a previous acquisition. */
+    assert(tcb->held_mutexes > 0);
+
+    tcb->held_mutexes--;
+
+    /* Remove the ceiling only after all mutexes are released. */
+    if (tcb->held_mutexes == 0)
+        tcb->inherited_priority = -1;
+}
+
 /* Interrupt handler for ALARM */
 void yield_handler() { yield(SCHED_QUANTUM); }
 
@@ -271,6 +319,17 @@ static void sched_register_timeout(TCB* tcb, TimerDuration timeout)
 }
 
 /*
+  MLFQ: Return the effective scheduling priority.
+  A temporary mutex-related boost may override the base priority.
+*/
+static int sched_effective_priority(const TCB* tcb)
+{
+    return (tcb->inherited_priority > tcb->priority)
+           ? tcb->inherited_priority
+           : tcb->priority;
+}
+
+/*
   Add TCB to the end of the scheduler list.
 
   *** MUST BE CALLED WITH sched_spinlock HELD ***
@@ -278,14 +337,64 @@ static void sched_register_timeout(TCB* tcb, TimerDuration timeout)
 static void sched_queue_add(TCB* tcb)
 {
 	/* Insert at the end of the scheduling list */
-	/* MLFQ: Use the queue corresponding to the thread priority. */
-	assert(tcb->priority >= 0 && tcb->priority < MLFQ_LEVELS);
+	/* MLFQ: Queue threads according to their effective priority. */
+	int effective = sched_effective_priority(tcb);
+
+	assert(effective >= 0 && effective < MLFQ_LEVELS);
+	rlist_push_back(&SCHED[effective], &tcb->sched_node);
 	/* MLFQ: Record when the thread starts waiting in READY. */
 	tcb->queued_at = mlfq_dispatches;
-	rlist_push_back(&SCHED[tcb->priority], &tcb->sched_node);
 
 	/* Restart possibly halted cores */
 	cpu_core_restart_one();
+}
+
+/*
+  MLFQ: Update inherited priority and reposition a queued thread.
+  Must not be called while holding sched_spinlock.
+*/
+void sched_set_inherited_priority(TCB* tcb, int priority)
+{
+    assert(tcb != NULL);
+    assert(priority >= -1 && priority < MLFQ_LEVELS);
+
+    /* Protect TCB metadata and scheduler queues. */
+    int oldpre = preempt_off;
+    Mutex_Lock(&sched_spinlock);
+
+    if (tcb->type == NORMAL_THREAD && tcb->state != EXITED) {
+
+        int old_effective = sched_effective_priority(tcb);
+
+        /* Update the temporary priority boost. */
+        tcb->inherited_priority = priority;
+
+        int new_effective = sched_effective_priority(tcb);
+
+        /*
+          Reposition only if the thread is actually queued.
+          A READY thread selected for execution may not be
+          linked to a READY queue yet.
+        */
+        if (old_effective != new_effective &&
+            tcb->state == READY &&
+            tcb->phase == CTX_CLEAN &&
+            !is_rlist_empty(&tcb->sched_node)) {
+
+            rlist_remove(&tcb->sched_node);
+            rlist_push_back(&SCHED[new_effective],
+                            &tcb->sched_node);
+
+            /* A newly promoted thread may need an idle core. */
+            cpu_core_restart_one();
+        }
+    }
+
+    Mutex_Unlock(&sched_spinlock);
+
+    /* Restore the previous preemption state. */
+    if (oldpre)
+        preempt_on;
 }
 
 /*
@@ -356,7 +465,8 @@ static void sched_apply_aging(void)
                 tcb->priority++;
                 tcb->queued_at = mlfq_dispatches;
 
-                rlist_push_back(&SCHED[tcb->priority], node);
+                /* MLFQ: Requeue using the effective priority. */
+				rlist_push_back(&SCHED[sched_effective_priority(tcb)], node);
             }
 
             node = next;
@@ -390,7 +500,7 @@ static TCB* sched_queue_select(TCB* current)
            Keep it if its priority is strictly higher. */
         if (current->state == READY &&
             current->type != IDLE_THREAD &&
-            current->priority > priority) {
+            sched_effective_priority(current) > priority) {
 
             next_thread = current;
 
@@ -644,6 +754,10 @@ void run_scheduler()
 	curcore->idle_thread.phase = CTX_DIRTY;
 	/* MLFQ: Initialize idle thread priority for consistency. */
 	curcore->idle_thread.priority = 0;
+	/* MLFQ: Idle threads do not inherit priority. */
+	curcore->idle_thread.inherited_priority = -1;
+	/* MLFQ: Idle threads initially hold no mutexes. */
+	curcore->idle_thread.held_mutexes = 0;
 	curcore->idle_thread.wakeup_time = NO_TIMEOUT;
 	rlnode_init(&curcore->idle_thread.sched_node, &curcore->idle_thread);
 

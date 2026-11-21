@@ -350,54 +350,6 @@ static void sched_queue_add(TCB* tcb)
 }
 
 /*
-  MLFQ: Update inherited priority and reposition a queued thread.
-  Must not be called while holding sched_spinlock.
-*/
-void sched_set_inherited_priority(TCB* tcb, int priority)
-{
-    assert(tcb != NULL);
-    assert(priority >= -1 && priority < MLFQ_LEVELS);
-
-    /* Protect TCB metadata and scheduler queues. */
-    int oldpre = preempt_off;
-    Mutex_Lock(&sched_spinlock);
-
-    if (tcb->type == NORMAL_THREAD && tcb->state != EXITED) {
-
-        int old_effective = sched_effective_priority(tcb);
-
-        /* Update the temporary priority boost. */
-        tcb->inherited_priority = priority;
-
-        int new_effective = sched_effective_priority(tcb);
-
-        /*
-          Reposition only if the thread is actually queued.
-          A READY thread selected for execution may not be
-          linked to a READY queue yet.
-        */
-        if (old_effective != new_effective &&
-            tcb->state == READY &&
-            tcb->phase == CTX_CLEAN &&
-            !is_rlist_empty(&tcb->sched_node)) {
-
-            rlist_remove(&tcb->sched_node);
-            rlist_push_back(&SCHED[new_effective],
-                            &tcb->sched_node);
-
-            /* A newly promoted thread may need an idle core. */
-            cpu_core_restart_one();
-        }
-    }
-
-    Mutex_Unlock(&sched_spinlock);
-
-    /* Restore the previous preemption state. */
-    if (oldpre)
-        preempt_on;
-}
-
-/*
 	Adjust the state of a thread to make it READY.
 
 	*** MUST BE CALLED WITH sched_spinlock HELD ***

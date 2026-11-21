@@ -277,12 +277,6 @@ void sleep_releasing(Thread_state newstate, Mutex* mx, enum SCHED_CAUSE cause, T
 void yield(enum SCHED_CAUSE cause);
 
 /*
-  MLFQ: Update a thread's inherited priority.
-  A value of -1 removes the temporary priority boost.
-*/
-void sched_set_inherited_priority(TCB* tcb, int priority);
-
-/*
   MLFQ: Mutex priority ceiling bookkeeping.
   These functions must be called with preemption disabled.
 */

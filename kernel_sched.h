@@ -115,7 +115,10 @@ struct process_thread_control_block* ptcb;
 	Thread_type type; /**< @brief The type of thread */
 	Thread_state state; /**< @brief The state of the thread */
 	Thread_phase phase; /**< @brief The phase of the thread */
+
+  /* MLFQ: Scheduler selection count when this thread entered READY queue. */
   int priority; /**< @brief MLFQ: Dynamic scheduling priority. */
+  uint64_t queued_at;
 
 	void (*thread_func)(); /**< @brief The initial function executed by this thread */
 

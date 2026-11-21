@@ -233,6 +233,12 @@ rlnode SCHED[MLFQ_LEVELS];
 rlnode TIMEOUT_LIST; /* The list of threads with a timeout */
 Mutex sched_spinlock = MUTEX_INIT; /* spinlock for scheduler queue */
 
+/* MLFQ: Aging after 32 scheduler selections spent waiting. */
+#define MLFQ_AGING_THRESHOLD 32ULL
+
+/* Protected by sched_spinlock. */
+static uint64_t mlfq_dispatches = 0;
+
 /* Interrupt handler for ALARM */
 void yield_handler() { yield(SCHED_QUANTUM); }
 
@@ -274,6 +280,8 @@ static void sched_queue_add(TCB* tcb)
 	/* Insert at the end of the scheduling list */
 	/* MLFQ: Use the queue corresponding to the thread priority. */
 	assert(tcb->priority >= 0 && tcb->priority < MLFQ_LEVELS);
+	/* MLFQ: Record when the thread starts waiting in READY. */
+	tcb->queued_at = mlfq_dispatches;
 	rlist_push_back(&SCHED[tcb->priority], &tcb->sched_node);
 
 	/* Restart possibly halted cores */
@@ -325,6 +333,38 @@ static void sched_wakeup_expired_timeouts()
 }
 
 /*
+  MLFQ: Promote threads that have waited too long in READY.
+  Must be called with sched_spinlock held.
+*/
+static void sched_apply_aging(void)
+{
+    for (int priority = 0; priority < MLFQ_LEVELS - 1; priority++) {
+
+        rlnode* node = SCHED[priority].next;
+
+        while (node != &SCHED[priority]) {
+
+            /* Save next before moving the current node. */
+            rlnode* next = node->next;
+            TCB* tcb = node->tcb;
+
+            if (mlfq_dispatches - tcb->queued_at >=
+                MLFQ_AGING_THRESHOLD) {
+
+                /* Move the waiting thread one priority level up. */
+                rlist_remove(node);
+                tcb->priority++;
+                tcb->queued_at = mlfq_dispatches;
+
+                rlist_push_back(&SCHED[tcb->priority], node);
+            }
+
+            node = next;
+        }
+    }
+}
+
+/*
   Remove the head of the scheduler list, if any, and
   return it. Return NULL if the list is empty.
 
@@ -336,6 +376,10 @@ static TCB* sched_queue_select(TCB* current)
     /* Get the head of the SCHED list */
     /* MLFQ: Search from highest to lowest priority. */
     TCB* next_thread = NULL;
+
+	/* MLFQ: Update waiting time and apply priority aging. */
+	mlfq_dispatches++;
+	sched_apply_aging();
 
     for (int priority = MLFQ_LEVELS - 1; priority >= 0; priority--) {
 
@@ -580,6 +624,9 @@ void initialize_scheduler()
 		rlnode_init(&SCHED[priority], NULL);
 
 	rlnode_init(&TIMEOUT_LIST, NULL);
+
+	/* MLFQ: Reset aging counter at scheduler initialization. */
+	mlfq_dispatches = 0;
 }
 
 void run_scheduler()

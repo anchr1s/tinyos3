@@ -457,6 +457,27 @@ void yield(enum SCHED_CAUSE cause)
 	current->last_cause = current->curr_cause;
 	current->curr_cause = cause;
 
+	/* MLFQ: Adjust priority according to the scheduling cause. */
+	if (current->type == NORMAL_THREAD && current->state != EXITED) {
+
+	    /* Using the entire quantum lowers the priority. */
+	    if (cause == SCHED_QUANTUM) {
+
+	        if (current->priority > 0)
+	            current->priority--;
+
+	    }
+	    /* Early I/O-related yields increase the priority. */
+	    else if ((cause == SCHED_IO ||
+	              cause == SCHED_PIPE ||
+	              cause == SCHED_POLL) && remaining > 0) {
+
+	        if (current->priority < MLFQ_LEVELS - 1)
+	            current->priority++;
+	    }
+	    /* Other scheduling causes leave the priority unchanged. */
+	}
+
 	/* Wake up threads whose sleep timeout has expired */
 	sched_wakeup_expired_timeouts();
 

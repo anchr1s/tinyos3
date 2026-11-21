@@ -163,6 +163,8 @@ TCB* spawn_thread(PCB* pcb, void (*func)())
 	tcb->type = NORMAL_THREAD;
 	tcb->state = INIT;
 	tcb->phase = CTX_CLEAN;
+	/* MLFQ: Initialize new threads at the highest priority. */
+	tcb->priority = MLFQ_INITIAL_PRIORITY;
 	tcb->thread_func = func;
 	tcb->wakeup_time = NO_TIMEOUT;
 	rlnode_init(&tcb->sched_node, tcb); /* Intrusive list node */
@@ -226,7 +228,8 @@ void release_TCB(TCB* tcb)
   Both of these structures are protected by @c sched_spinlock.
 */
 
-rlnode SCHED; /* The scheduler queue */
+/* MLFQ: One FIFO READY queue for each priority level. */
+rlnode SCHED[MLFQ_LEVELS];
 rlnode TIMEOUT_LIST; /* The list of threads with a timeout */
 Mutex sched_spinlock = MUTEX_INIT; /* spinlock for scheduler queue */
 
@@ -269,7 +272,9 @@ static void sched_register_timeout(TCB* tcb, TimerDuration timeout)
 static void sched_queue_add(TCB* tcb)
 {
 	/* Insert at the end of the scheduling list */
-	rlist_push_back(&SCHED, &tcb->sched_node);
+	/* MLFQ: Use the queue corresponding to the thread priority. */
+	assert(tcb->priority >= 0 && tcb->priority < MLFQ_LEVELS);
+	rlist_push_back(&SCHED[tcb->priority], &tcb->sched_node);
 
 	/* Restart possibly halted cores */
 	cpu_core_restart_one();
@@ -327,13 +332,40 @@ static void sched_wakeup_expired_timeouts()
 */
 static TCB* sched_queue_select(TCB* current)
 {
-	/* Get the head of the SCHED list */
-	rlnode* sel = rlist_pop_front(&SCHED);
 
-	TCB* next_thread = sel->tcb; /* When the list is empty, this is NULL */
+    /* Get the head of the SCHED list */
+    /* MLFQ: Search from highest to lowest priority. */
+    TCB* next_thread = NULL;
 
-	if (next_thread == NULL)
-		next_thread = (current->state == READY) ? current : &CURCORE.idle_thread;
+    for (int priority = MLFQ_LEVELS - 1; priority >= 0; priority--) {
+
+        if (is_rlist_empty(&SCHED[priority]))
+            continue;
+
+        /* MLFQ: The current READY thread is not queued yet.
+           Keep it if its priority is strictly higher. */
+        if (current->state == READY &&
+            current->type != IDLE_THREAD &&
+            current->priority > priority) {
+
+            next_thread = current;
+
+        } else {
+
+            /* Select the first thread of this priority queue. */
+            rlnode* sel = rlist_pop_front(&SCHED[priority]);
+            next_thread = sel->tcb;
+        }
+
+        break;
+    }
+
+    /* No queued thread: reuse current or select the idle thread. */
+    if (next_thread == NULL) {
+        next_thread = (current->state == READY)
+                    ? current
+                    : &CURCORE.idle_thread;
+	}
 
 	next_thread->its = QUANTUM;
 
@@ -522,7 +554,10 @@ static void idle_thread()
  */
 void initialize_scheduler()
 {
-	rlnode_init(&SCHED, NULL);
+	/* MLFQ: Initialize every READY queue. */
+	for (int priority = 0; priority < MLFQ_LEVELS; priority++)
+		rlnode_init(&SCHED[priority], NULL);
+
 	rlnode_init(&TIMEOUT_LIST, NULL);
 }
 
@@ -539,6 +574,8 @@ void run_scheduler()
 	curcore->idle_thread.type = IDLE_THREAD;
 	curcore->idle_thread.state = RUNNING;
 	curcore->idle_thread.phase = CTX_DIRTY;
+	/* MLFQ: Initialize idle thread priority for consistency. */
+	curcore->idle_thread.priority = 0;
 	curcore->idle_thread.wakeup_time = NO_TIMEOUT;
 	rlnode_init(&curcore->idle_thread.sched_node, &curcore->idle_thread);
 

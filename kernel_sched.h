@@ -93,6 +93,12 @@ enum SCHED_CAUSE {
 
 struct process_thread_control_block;
 
+/* MLFQ: Number of priority levels (0 = lowest priority). */
+#define MLFQ_LEVELS 4
+
+/* MLFQ: New threads start at the highest priority. */
+#define MLFQ_INITIAL_PRIORITY (MLFQ_LEVELS - 1)
+
 /**
   @brief The thread control block
 
@@ -109,6 +115,7 @@ struct process_thread_control_block* ptcb;
 	Thread_type type; /**< @brief The type of thread */
 	Thread_state state; /**< @brief The state of the thread */
 	Thread_phase phase; /**< @brief The phase of the thread */
+  int priority; /**< @brief MLFQ: Dynamic scheduling priority. */
 
 	void (*thread_func)(); /**< @brief The initial function executed by this thread */
 

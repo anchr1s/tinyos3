@@ -179,8 +179,8 @@ BOOT_TEST(test_priority_inversion,
     Tid_t medium = CreateThread(medium_priority_task, 0, NULL);
     Tid_t high = CreateThread(high_priority_task, 0, NULL);
 
-    ASSERT(medium != -1);
-    ASSERT(high != -1);
+    ASSERT(medium != NOTHREAD);
+    ASSERT(high != NOTHREAD);
 
     /*
      * Allow both threads to start.
@@ -245,10 +245,10 @@ BOOT_TEST(test_priority_inversion,
      * STEP 5: Wait for HIGH and MEDIUM to finish.
      * -------------------------------------------------------- */
 
-    if (high != -1)
+    if (high != NOTHREAD)
         ASSERT(ThreadJoin(high, NULL) == 0);
 
-    if (medium != -1)
+    if (medium != NOTHREAD)
         ASSERT(ThreadJoin(medium, NULL) == 0);
 
     /* Restore the boot thread's original base priority. */

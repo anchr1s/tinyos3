@@ -320,7 +320,9 @@ void sys_Exit(int exitval)
   }
 
   /* First, store the exit status */
-  curproc->exitval = exitval;
+  /* Preserve the first explicit Exit status, if already requested. */
+  if (!curproc->exit_requested)
+      curproc->exitval = exitval;
 
   /* 
     Here, we must check that we are not the init task. 

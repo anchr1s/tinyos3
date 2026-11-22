@@ -125,10 +125,14 @@ int sys_ThreadJoin(Tid_t tid, int* exitval)
     /* Wait until the target thread terminates or is detached. */
     if (!ptcb->exited) {
         ptcb->join_waiters++;
+        /* Keep the wait registration visible to process-wide cancellation. */
+        cur_thread()->pending_join = ptcb;
 
         while (!ptcb->exited && !ptcb->detached)
             kernel_wait(&ptcb->exit_cv, SCHED_USER);
 
+        /* Normal return from the wait owns this decrement. */
+        cur_thread()->pending_join = NULL;
         ptcb->join_waiters--;
     }
 
@@ -186,6 +190,21 @@ void sys_ThreadExit(int exitval)
 
     CHECK_CONDITION(ptcb != NULL);
     CHECK_CONDITION(!ptcb->exited);
+
+    /* A canceled ThreadJoin never returns to decrement join_waiters. */
+    if (tcb->pending_join != NULL) {
+        PTCB* target = tcb->pending_join;
+        tcb->pending_join = NULL;
+        CHECK_CONDITION(target->join_waiters > 0);
+        target->join_waiters--;
+        /* Match the cleanup performed by the regular ThreadJoin path. */
+        if (target->exited && target->join_waiters == 0 &&
+            (target->detached || target->joined))
+            release_ptcb(target);
+    }
+
+    /* Release this thread's mutexes before it leaves the process. */
+    release_owned_mutexes_on_exit();
 
     /* Store the exit status. */
     ptcb->exitval = exitval;

@@ -169,6 +169,12 @@ TCB* spawn_thread(PCB* pcb, void (*func)())
 	tcb->inherited_priority = -1;
 	/* MLFQ: New threads initially hold no mutexes. */
 	tcb->held_mutexes = 0;
+        /* No stack-allocated CV waiter exists in a new thread. */
+        tcb->cv_waiter_active = 0;
+        tcb->owns_kernel_semaphore = 0;
+        tcb->owned_mutexes = NULL;
+        tcb->cancel_defer = 0;
+        tcb->pending_join = NULL;
 	tcb->thread_func = func;
 	tcb->wakeup_time = NO_TIMEOUT;
 	rlnode_init(&tcb->sched_node, tcb); /* Intrusive list node */
@@ -519,10 +525,16 @@ void sleep_releasing(Thread_state state, Mutex* mx, enum SCHED_CAUSE cause,
 	Mutex_Lock(&sched_spinlock);
 
 	/* mark the thread as stopped or exited */
-	tcb->state = state;
+	/* An Exit request must not be lost between a wakeup and sleep. */
+	if (state == STOPPED && tcb->ptcb != NULL &&
+        __atomic_load_n(&tcb->owner_pcb->exit_requested, __ATOMIC_ACQUIRE)) {
+        tcb->state = READY;
+    } else {
+        tcb->state = state;
+    }
 
 	/* register the timeout (if any) for the sleeping thread */
-	if (state != EXITED)
+	if (tcb->state == STOPPED)
 		sched_register_timeout(tcb, timeout);
 
 	/* Release mx */
@@ -656,6 +668,18 @@ void gain(int preempt)
 	if (preempt)
 		preempt_on;
 
+    /* Cancellation checkpoint for CPU-bound user code without syscalls.
+       The thread must not own the kernel monitor or have an active CV waiter. */
+    if (current->ptcb != NULL &&
+        !current->cv_waiter_active && !current->cancel_defer &&
+        !current->owns_kernel_semaphore &&
+        __atomic_load_n(&current->owner_pcb->exit_requested,
+                        __ATOMIC_ACQUIRE)) {
+        kernel_lock();
+        sys_ThreadExit(0);
+        __builtin_unreachable();
+    }
+
 	/* Set a 1-quantum alarm */
 	bios_set_timer(current->rts);
 }
@@ -710,6 +734,11 @@ void run_scheduler()
 	curcore->idle_thread.inherited_priority = -1;
 	/* MLFQ: Idle threads initially hold no mutexes. */
 	curcore->idle_thread.held_mutexes = 0;
+        curcore->idle_thread.cv_waiter_active = 0;
+        curcore->idle_thread.owns_kernel_semaphore = 0;
+        curcore->idle_thread.owned_mutexes = NULL;
+        curcore->idle_thread.cancel_defer = 0;
+        curcore->idle_thread.pending_join = NULL;
 	curcore->idle_thread.wakeup_time = NO_TIMEOUT;
 	rlnode_init(&curcore->idle_thread.sched_node, &curcore->idle_thread);
 

@@ -1,10 +1,71 @@
 
 
 #include <assert.h>
+#include <stdlib.h>
 
 #include "kernel_sched.h"
 #include "kernel_proc.h"
 #include "kernel_cc.h"
+
+/* Each record identifies a mutex actually owned by this TCB.
+   Never release a mutex belonging to a different thread. */
+struct held_mutex_node {
+    Mutex* mutex;
+    struct held_mutex_node* next;
+};
+
+static void track_mutex_acquired(Mutex* mutex)
+{
+    TCB* t = cur_thread();
+    if (t == NULL || t->type != NORMAL_THREAD || t->ptcb == NULL ||
+        t->owns_kernel_semaphore || t->cancel_defer) return;
+    HeldMutexNode* n = malloc(sizeof(*n));
+    assert(n != NULL);
+    n->mutex = mutex;
+    n->next = t->owned_mutexes;
+    t->owned_mutexes = n;
+}
+
+static void track_mutex_released(Mutex* mutex)
+{
+    TCB* t = cur_thread();
+    if (t == NULL || t->type != NORMAL_THREAD) return;
+    HeldMutexNode** pn = &t->owned_mutexes;
+    while (*pn != NULL && (*pn)->mutex != mutex) pn = &(*pn)->next;
+    if (*pn == NULL) return; /* Kernel-internal locks are not tracked. */
+    HeldMutexNode* n = *pn;
+    *pn = n->next;
+    free(n);
+}
+
+/* Called with the kernel semaphore held, before exiting the thread.
+   This thread releases only the mutexes it actually owns. */
+void release_owned_mutexes_on_exit(void)
+{
+    TCB* t = cur_thread();
+    while (t != NULL && t->owned_mutexes != NULL)
+        Mutex_Unlock(t->owned_mutexes->mutex);
+}
+
+/* Prevent timer cancellation while a CV or monitor operation is incomplete. */
+static void cancellation_defer_enter(void)
+{
+    int pre = preempt_off;
+    TCB* t = cur_thread();
+    if (t != NULL) t->cancel_defer++;
+    if (pre) preempt_on;
+}
+
+static void cancellation_defer_leave(void)
+{
+    int pre = preempt_off;
+    TCB* t = cur_thread();
+    if (t != NULL) { assert(t->cancel_defer > 0); t->cancel_defer--; }
+    if (pre) preempt_on;
+}
+
+/* Forward declaration for detecting the kernel monitor mutex. */
+static Mutex kernel_mutex;
 
 /* MLFQ: Scheduler lock must not receive a priority ceiling. */
 extern Mutex sched_spinlock;
@@ -49,6 +110,17 @@ void Mutex_Lock(Mutex* lock)
 
     int spin=MUTEX_SPINS;
     while(__atomic_load_n(lock, __ATOMIC_RELAXED)) {
+      /* Process Exit: do not spin forever on a mutex whose owner exited.
+         The kernel's monitor and scheduler mutexes are handled elsewhere. */
+      TCB* waiting = cur_thread();
+      if (oldpre && cpu_interrupts_enabled() &&
+          lock != &kernel_mutex && lock != &sched_spinlock &&
+          waiting != NULL && waiting->ptcb != NULL &&
+          !waiting->cv_waiter_active && !waiting->cancel_defer &&
+          !waiting->owns_kernel_semaphore &&
+          __atomic_load_n(&waiting->owner_pcb->exit_requested, __ATOMIC_ACQUIRE)) {
+        Exit(0); /* The syscall entry checkpoint terminates this thread. */
+      }
 #if defined(__x86__) || defined(__x86_64__)
       __builtin_ia32_pause();
 #endif
@@ -66,8 +138,10 @@ void Mutex_Lock(Mutex* lock)
   }
 
   /* MLFQ: Do not boost priority for the scheduler's own lock. */
-  if (lock != &sched_spinlock)
+  if (lock != &sched_spinlock) {
       sched_mutex_acquired();
+      track_mutex_acquired(lock);
+  }
 
   /* MLFQ: Restore the previous preemption state. */
   if(oldpre) preempt_on;
@@ -81,8 +155,10 @@ void Mutex_Unlock(Mutex* lock)
   int oldpre = preempt_off;
 
 /* MLFQ: Exclude the scheduler lock from mutex bookkeeping. */
-if (lock != &sched_spinlock)
+if (lock != &sched_spinlock) {
+    track_mutex_released(lock);
     sched_mutex_released();
+}
 
   __atomic_clear(lock, __ATOMIC_RELEASE);
 
@@ -153,6 +229,11 @@ static int cv_wait(Mutex* mutex, CondVar* cv,
 	__cv_waiter waiter = { .thread=cur_thread(), .signalled = 0, .removed=0 };
 	rlnode_init(& waiter.node, &waiter);
 
+        /* Protect the stack-allocated waiter until it leaves the CV ring. */
+        TCB* waiting_thread = cur_thread();
+        if (waiting_thread != NULL)
+            waiting_thread->cv_waiter_active = 1;
+
 	Mutex_Lock(&(cv->waitset_lock));
 	/* We just push the current thread to the back of the list */
 	if(cv->waitset) {
@@ -175,6 +256,10 @@ static int cv_wait(Mutex* mutex, CondVar* cv,
 		remove_from_ring(cv, &waiter);
 	}
 	Mutex_Unlock(&(cv->waitset_lock));
+
+        /* The stack waiter is no longer reachable through the CV. */
+        if (waiting_thread != NULL)
+            waiting_thread->cv_waiter_active = 0;
 
 	Mutex_Lock(mutex);
 	return waiter.signalled;
@@ -203,31 +288,52 @@ static inline void cv_signal(CondVar* cv)
 
 
 
+/* This helper runs after cv_wait has removed its stack waiter. */
+static void finish_cond_wait_cancellation(Mutex* mutex)
+{
+    if (cur_thread() != NULL && cur_thread()->ptcb != NULL &&
+        __atomic_load_n(&CURPROC->exit_requested, __ATOMIC_ACQUIRE) &&
+        mutex != &kernel_mutex) {
+        /* The caller owns this user mutex again; release before exiting. */
+        Mutex_Unlock(mutex);
+        kernel_lock();
+        sys_ThreadExit(0);
+    }
+}
+
 int Cond_Wait(Mutex* mutex, CondVar* cv)
 {
-	return cv_wait(mutex, cv, SCHED_USER, NO_TIMEOUT);
+    int result = cv_wait(mutex, cv, SCHED_USER, NO_TIMEOUT);
+    finish_cond_wait_cancellation(mutex);
+    return result;
 }
 
 int Cond_TimedWait(Mutex* mutex, CondVar* cv, timeout_t timeout)
 {
 	/* We have to translate timeout from msec to usec */
-	return cv_wait(mutex, cv, SCHED_USER, timeout*1000ul);
+    int result = cv_wait(mutex, cv, SCHED_USER, timeout*1000ul);
+    finish_cond_wait_cancellation(mutex);
+    return result;
 }
 
 
 void Cond_Signal(CondVar* cv)
 {
+  cancellation_defer_enter();
   Mutex_Lock(&(cv->waitset_lock));
   cv_signal(cv);
   Mutex_Unlock(&(cv->waitset_lock));
+  cancellation_defer_leave();
 }
 
 
 void Cond_Broadcast(CondVar* cv)
 {
+  cancellation_defer_enter();
   Mutex_Lock(&(cv->waitset_lock));
   while(cv->waitset) cv_signal(cv);
   Mutex_Unlock(&(cv->waitset_lock));
+  cancellation_defer_leave();
 }
 
 
@@ -262,27 +368,45 @@ static CondVar kernel_sem_cv = COND_INIT;
 
 void kernel_lock()
 {
+    cancellation_defer_enter();
+    int preempt = preempt_off;
 	Mutex_Lock(& kernel_mutex);
 	while(kernel_sem<=0) {
 		Cond_Wait(& kernel_mutex, &kernel_sem_cv);
 	}
 	kernel_sem--;
+    if (cur_thread() != NULL) {
+        cur_thread()->owns_kernel_semaphore = 1;
+	}
 	Mutex_Unlock(& kernel_mutex);
+    if (preempt) preempt_on;
+    cancellation_defer_leave();
 }
 
 void kernel_unlock()
 {
+    cancellation_defer_enter();
+    int preempt = preempt_off;
 	Mutex_Lock(& kernel_mutex);
+    if (cur_thread() != NULL) {
+        cur_thread()->owns_kernel_semaphore = 0;
+    }
 	kernel_sem++;
 	Cond_Signal(&kernel_sem_cv);
 	Mutex_Unlock(& kernel_mutex);
+    if (preempt) preempt_on;
+    cancellation_defer_leave();
 }
 
 int kernel_wait_wchan(CondVar* cv, enum SCHED_CAUSE cause, 
 	const char* wchan_name, TimerDuration timeout)
 {
+    cancellation_defer_enter();
 	/* Atomically release kernel semaphore */
 	Mutex_Lock(& kernel_mutex);
+    if (cur_thread() != NULL) {
+        cur_thread()->owns_kernel_semaphore = 0;
+    }
 	kernel_sem++;
 	Cond_Signal(&kernel_sem_cv);	
 
@@ -292,7 +416,17 @@ int kernel_wait_wchan(CondVar* cv, enum SCHED_CAUSE cause,
 	while(kernel_sem<=0)
 		Cond_Wait(& kernel_mutex, &kernel_sem_cv);
 	kernel_sem--;
+    if (cur_thread() != NULL) {
+        cur_thread()->owns_kernel_semaphore = 1;
+    }
 	Mutex_Unlock(& kernel_mutex);		
+
+    cancellation_defer_leave();
+    /* The condition waiter is removed and the kernel semaphore is held. */
+    if (cur_thread() != NULL && cur_thread()->ptcb != NULL &&
+        CURPROC->exit_requested) {
+        sys_ThreadExit(0);
+    }
 
 	return ret;
 }
@@ -310,6 +444,9 @@ void kernel_broadcast(CondVar* cv)
 void kernel_sleep(Thread_state newstate, enum SCHED_CAUSE cause)
 {
 	Mutex_Lock(& kernel_mutex);
+    if (cur_thread() != NULL) {
+        cur_thread()->owns_kernel_semaphore = 0;
+    }
 	kernel_sem++;
 	Cond_Signal(&kernel_sem_cv);
 	sleep_releasing(newstate, &kernel_mutex, cause, NO_TIMEOUT);

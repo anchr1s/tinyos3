@@ -105,6 +105,8 @@ struct process_thread_control_block;
   An object of this type is associated to every thread. In this object
   are stored all the metadata that relate to the thread.
 */
+typedef struct held_mutex_node HeldMutexNode;
+
 typedef struct thread_control_block {
 
 	PCB* owner_pcb; /**< @brief This is null for a free TCB */
@@ -126,6 +128,20 @@ struct process_thread_control_block* ptcb;
 
   /* MLFQ: Number of mutexes currently held by this thread. */
   unsigned int held_mutexes;
+
+  /* Process Exit: a condition-variable waiter is still on this stack. */
+  unsigned char cv_waiter_active;
+
+  /* True only while this thread owns the kernel semaphore token. */
+  unsigned char owns_kernel_semaphore;
+
+  /* Exit: mutexes acquired by this thread; needed for cleanup. */
+  HeldMutexNode* owned_mutexes;
+  /* Defer asynchronous cancellation within CV and monitor bookkeeping. */
+  unsigned int cancel_defer;
+
+  /* An active ThreadJoin registration, released if this thread is canceled. */
+  struct process_thread_control_block* pending_join;
 
 	void (*thread_func)(); /**< @brief The initial function executed by this thread */
 

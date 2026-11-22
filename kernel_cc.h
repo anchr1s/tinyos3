@@ -47,6 +47,9 @@ void kernel_lock();
  */
 void kernel_unlock();
 
+/* Release only the mutexes owned by the exiting thread. */
+void release_owned_mutexes_on_exit(void);
+
 /**
 	@brief Wait on a condition variable using the kernel lock.
 	@returns 1 if signalled, 0 if not

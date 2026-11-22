@@ -309,8 +309,18 @@ void sys_Exit(int exitval)
 
       /* Preserve the first explicit process exit status. */
       if (!curproc->exit_requested) {
-          curproc->exit_requested = 1;
           curproc->exitval = exitval;
+          /* Publish the first exit status before waking sibling threads. */
+          __atomic_store_n(&curproc->exit_requested, 1, __ATOMIC_RELEASE);
+      }
+
+      /* Process-wide Exit: wake blocked sibling threads so they can exit. */
+      for (rlnode* node = curproc->threads_list.next;
+           node != &curproc->threads_list;
+           node = node->next) {
+          PTCB* sibling = node->obj;
+          if (sibling->tcb != NULL && sibling->tcb != cur_thread())
+              wakeup(sibling->tcb);
       }
 
       /* Terminate this thread without cleaning the PCB yet. */
@@ -318,6 +328,9 @@ void sys_Exit(int exitval)
 
       __builtin_unreachable();
   }
+
+  /* A single-threaded Exit must also release this thread's user mutexes. */
+  release_owned_mutexes_on_exit();
 
   /* First, store the exit status */
   /* Preserve the first explicit Exit status, if already requested. */

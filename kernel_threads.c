@@ -66,9 +66,10 @@ Tid_t sys_CreateThread(Task task, int argl, void* args)
     ptcb->tcb = tcb;
     tcb->ptcb = ptcb;
 
-    ptcb->tid = (Tid_t)tcb;
+    /* The PTCB remains allocated while the thread can still be joined. */
+    ptcb->tid = (Tid_t)ptcb;
 
-    Tid_t tid = (Tid_t)tcb;
+    Tid_t tid = ptcb->tid;
 
     wakeup(tcb);
 
@@ -80,7 +81,7 @@ Tid_t sys_CreateThread(Task task, int argl, void* args)
  */
 Tid_t sys_ThreadSelf()
 {
-	return (Tid_t) cur_thread();
+	return cur_thread()->ptcb->tid;
 }
 
 static PTCB* find_ptcb(PCB* pcb, Tid_t tid)
@@ -112,7 +113,7 @@ void release_ptcb(PTCB* ptcb)
 int sys_ThreadJoin(Tid_t tid, int* exitval)
 {
     /* A thread cannot join itself or an invalid thread. */
-    if (tid == NOTHREAD || tid == (Tid_t)cur_thread())
+    if (tid == NOTHREAD || tid == cur_thread()->ptcb->tid)
         return -1;
 
     /* Find the requested thread in the current process. */

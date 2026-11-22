@@ -189,7 +189,8 @@ Pid_t sys_Exec(Task call, int argl, void* args)
     newproc->main_thread = spawn_thread(newproc, start_main_thread);
 
     main_ptcb->tcb = newproc->main_thread;
-    main_ptcb->tid = (Tid_t)newproc->main_thread;
+    /* Keep the main thread ID valid until its PTCB is released. */
+    main_ptcb->tid = (Tid_t)main_ptcb;
     newproc->main_thread->ptcb = main_ptcb;
 
     wakeup(newproc->main_thread);

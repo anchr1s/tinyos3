@@ -61,6 +61,7 @@ PTCB* create_ptcb(PCB* pcb, Task task, int argl, void* args);
  */
 typedef struct process_control_block {
   pid_state  pstate;      /**< @brief The pid state for this PCB */
+  unsigned long generation;  /* Distinguish successive uses of the same PID. */
 
   PCB* parent;            /**< @brief Parent's pcb. */
   int exitval;            /**< @brief The exit value of the process */

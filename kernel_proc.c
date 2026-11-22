@@ -33,6 +33,7 @@ Pid_t get_pid(PCB* pcb)
 static inline void initialize_PCB(PCB* pcb)
 {
   pcb->pstate = FREE;
+  pcb->generation = 0;
   pcb->argl = 0;
   pcb->args = NULL;
 
@@ -86,6 +87,7 @@ PCB* acquire_PCB()
   if(pcb_freelist != NULL) {
     pcb = pcb_freelist;
     pcb->pstate = ALIVE;
+    pcb->generation++;  /* A reused PID is a different child. */
     pcb->live_threads = 0;
     pcb->exit_requested = 0;
     pcb_freelist = pcb_freelist->parent;
@@ -245,9 +247,18 @@ static Pid_t wait_for_specific_child(Pid_t cpid, int* status)
   }
 
   /* Ok, child is a legal child of mine. Wait for it to exit. */
-  while(child->pstate == ALIVE)
+  /* Remember which process occupied this PID before releasing the monitor. */
+  unsigned long generation = child->generation;
+  while(child->generation == generation && child->pstate == ALIVE)
     kernel_wait(& parent->child_exit, SCHED_USER);
-  
+
+  /* Another waiter may have reaped the child, even reusing its PID. */
+  if (child->generation != generation || child->pstate != ZOMBIE ||
+      child->parent != parent) {
+    cpid = NOPROC;
+    goto finish;
+  }
+
   cleanup_zombie(child, status);
   
 finish:
